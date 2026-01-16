@@ -1,7 +1,8 @@
 /*==============================================================================
   FirnExchange - Streamlit in Snowflake (SiS) Deployment Script
   
-  Purpose: Deploy FirnExchange data migration tool as a Streamlit app in Snowflake
+  Purpose: FirnExchange is a High performance data migration tool buitl as Streamlit app in Snowflake.
+  Move Large scale Snowflake native table data into Snowflake managed Iceberg Tables 
   Version: 1.0
   
   Usage:
@@ -96,7 +97,7 @@ CREATE COMPUTE POOL IF NOT EXISTS COMPUTE_POOL_CPU_X64_S_3VCPU_13GB
 SHOW COMPUTE POOLS LIKE 'COMPUTE_POOL_CPU_X64_S_3VCPU_13GB';
 
 
-alter compute pool COMPUTE_POOL_CPU_X64_XS_1VCPU_6GB suspend;
+alter compute pool COMPUTE_POOL_CPU_X64_S_3VCPU_13GB suspend;
 --------------------------------------------------------------------------------
 -- STEP 7: Create Warehouse (for Query Execution)
 --------------------------------------------------------------------------------
@@ -124,9 +125,9 @@ CREATE OR REPLACE STREAMLIT FT_DB.FT_SCH.FirnExchange
     FROM '@FT_DB.FT_SCH.FIRNEXCHANGE_STAGE'
     MAIN_FILE = 'FirnExchange.py'
     QUERY_WAREHOUSE = 'XSMALL'
-    -- COMPUTE_POOL = 'COMPUTE_POOL_CPU_X64_L_28VCPU_116GB'
+    COMPUTE_POOL = 'COMPUTE_POOL_CPU_X64_L_28VCPU_116GB'
     -- COMPUTE_POOL = 'COMPUTE_POOL_CPU_X64_S_3VCPU_13GB'
-    COMPUTE_POOL = 'COMPUTE_POOL_CPU_X64_XS_1VCPU_6GB'
+    -- COMPUTE_POOL = 'COMPUTE_POOL_CPU_X64_XS_1VCPU_6GB'
     RUNTIME_NAME = 'SYSTEM$ST_CONTAINER_RUNTIME_PY3_11'
     COMMENT = 'FirnExchange - High-Performance Data Migration Tool for Snowflake'
     TITLE = 'FirnExchange'
