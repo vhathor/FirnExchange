@@ -4,7 +4,10 @@
   Purpose: FirnExchange is a High performance data migration tool buitl as Streamlit app in Snowflake.
   Move Large scale Snowflake native table data into Snowflake managed Iceberg Tables 
   Version: 1.0
-  
+
+  Ensure that you have snow cli installed and have connnections configured.
+  Learn about snow cli: https://docs.snowflake.com/en/developer-guide/snowflake-cli/index
+
   Usage:
     cd /Users/vverma/sprojects/FirnExchange
     snow sql --connection sf-usb97494-vverma-kp_une --filename firnexchange_sis.sql
@@ -15,6 +18,7 @@
     - Snowflake CLI configured with appropriate connection
 ==============================================================================*/
 
+--This is sample script from my demo account, update as per your Snowflake account.
 -- Set execution context
 USE ROLE ACCOUNTADMIN;
 USE WAREHOUSE XSMALL;
