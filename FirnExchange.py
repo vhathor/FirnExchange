@@ -281,7 +281,8 @@ def create_tracking_table(session, database, schema, table_name, partition_colum
         else:
             print(f"[Tracking Table] Creating new tracking table: {tracking_table}")
             create_sql = f"""
-            CREATE HYBRID TABLE IF NOT EXISTS {tracking_table} (
+            -- CREATE HYBRID TABLE IF NOT EXISTS {tracking_table} (
+            CREATE TABLE IF NOT EXISTS {tracking_table} (
                 --ID INT AUTOINCREMENT PRIMARY KEY,
                 {partition_cols_sql} PRIMARY KEY,
                 TOTAL_ROWS BIGINT,
@@ -1538,8 +1539,10 @@ with tab1:
                             # Drop log table button
                             if st.button("🗑️ Drop Log Table", key="export_drop_log_table", type="secondary"):
                                 try:
+                                    # Use fully qualified path for drop table
+                                    fully_qualified_log_table = f'"{exchange_src_database}"."{exchange_src_schema}"."{log_table_name}"'
                                     with st.spinner(f"Dropping log table `{log_table_name}`..."):
-                                        session.sql(f"DROP TABLE IF EXISTS {log_table_name}").collect()
+                                        session.sql(f"DROP TABLE IF EXISTS {fully_qualified_log_table}").collect()
                                         st.success(f"✅ Log table `{log_table_name}` dropped successfully")
                                         # Clear all partition-related session state
                                         st.session_state.exchange_log_table_loaded = False
@@ -2170,8 +2173,10 @@ with tab1:
                         # Drop log table button
                         if st.button("🗑️ Drop Log Table", key="import_drop_log_table", type="secondary"):
                             try:
+                                # Use fully qualified path for drop table
+                                fully_qualified_log_table_import = f'"{exchange_tgt_database}"."{exchange_tgt_schema}"."{log_table_name_import}"'
                                 with st.spinner(f"Dropping log table `{log_table_name_import}`..."):
-                                    session.sql(f"DROP TABLE IF EXISTS {log_table_name_import}").collect()
+                                    session.sql(f"DROP TABLE IF EXISTS {fully_qualified_log_table_import}").collect()
                                     st.success(f"✅ Log table `{log_table_name_import}` dropped successfully")
                                     st.rerun()
                             except Exception as e:
