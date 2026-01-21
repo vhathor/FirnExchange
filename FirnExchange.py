@@ -416,6 +416,82 @@ def load_log_table_data_as_list(session, log_table_name, database, schema):
         traceback.print_exc()
         return []
 
+def get_parquet_compatible_columns(session, database, schema, table):
+    """
+    Get column list with Parquet-compatible type casting for export operations.
+    
+    Transforms incompatible Snowflake data types to Parquet-supported formats:
+    - TIMESTAMP_TZ/LTZ -> TIMESTAMP_NTZ(6)
+    - VARIANT -> STRING
+    - GEOGRAPHY/GEOMETRY -> ST_ASTEXT()
+    - TIME -> TIME(6)
+    
+    Returns:
+        tuple: (column_selection_string, transformation_info_dict)
+    """
+    try:
+        print(f"[Parquet Columns] Analyzing table schema: {database}.{schema}.{table}")
+        
+        # Query to build Parquet-compatible column list with transformations
+        query = f"""
+        SELECT LISTAGG(
+            CASE
+                WHEN data_type = 'TIME'          THEN column_name || '::TIME(6) '            || column_name
+                WHEN data_type = 'TIMESTAMP_TZ'  THEN column_name || '::TIMESTAMP_NTZ(6) '  || column_name
+                WHEN data_type = 'TIMESTAMP_LTZ' THEN column_name || '::TIMESTAMP_NTZ(6) '  || column_name
+                WHEN data_type = 'TIMESTAMP_NTZ' THEN column_name || '::TIMESTAMP_NTZ(6) '  || column_name
+                WHEN data_type = 'VARIANT'       THEN column_name || '::STRING '            || column_name
+                WHEN data_type = 'GEOGRAPHY'     THEN 'ST_ASTEXT(' || column_name || ') '   || column_name
+                WHEN data_type = 'GEOMETRY'      THEN 'ST_ASTEXT(' || column_name || ') '   || column_name
+                ELSE column_name
+            END, ', '
+        ) WITHIN GROUP (ORDER BY ordinal_position) AS column_list
+        FROM "{database}".INFORMATION_SCHEMA.COLUMNS
+        WHERE table_catalog = '{database}'
+          AND table_schema = '{schema}'
+          AND table_name = '{table}'
+        """
+        
+        result = session.sql(query).collect()
+        
+        if not result or not result[0]['COLUMN_LIST']:
+            raise Exception(f"No columns found for table {database}.{schema}.{table}")
+        
+        column_list = result[0]['COLUMN_LIST']
+        print(f"[Parquet Columns] Generated column list with {column_list.count(',') + 1} columns")
+        
+        # Get transformation details for UI display
+        detail_query = f"""
+        SELECT 
+            data_type,
+            COUNT(*) as count
+        FROM "{database}".INFORMATION_SCHEMA.COLUMNS
+        WHERE table_catalog = '{database}'
+          AND table_schema = '{schema}'
+          AND table_name = '{table}'
+          AND data_type IN ('TIMESTAMP_TZ', 'TIMESTAMP_LTZ', 'TIMESTAMP_NTZ', 'TIME', 'VARIANT', 'GEOGRAPHY', 'GEOMETRY')
+        GROUP BY data_type
+        ORDER BY data_type
+        """
+        
+        detail_result = session.sql(detail_query).collect()
+        
+        # Build transformation info
+        transformations = {}
+        for row in detail_result:
+            data_type = row['DATA_TYPE']
+            count = row['COUNT']
+            transformations[data_type] = count
+        
+        print(f"[Parquet Columns] Transformations: {transformations}")
+        
+        return column_list, transformations
+        
+    except Exception as e:
+        error_msg = f"Failed to generate Parquet-compatible columns: {str(e)}"
+        print(f"[Parquet Columns] ERROR: {error_msg}")
+        raise Exception(error_msg)
+
 def build_where_clause(partition_columns, partition_values):
     """Build WHERE clause for partition"""
     conditions = []
@@ -431,7 +507,7 @@ def build_where_clause(partition_columns, partition_values):
     return ' AND '.join(conditions)
 
 def migrate_partition(tracking_table, source_database, source_schema, source_table, 
-                     partition_columns, partition_values, stage, stage_path, warehouse, overwrite=True, single_file=True, max_file_size=5368709120, max_retries=3):
+                     partition_columns, partition_values, stage, stage_path, warehouse, parquet_compatible_columns, overwrite=True, single_file=True, max_file_size=5368709120, max_retries=3):
     """Migrate a single partition using async queries (runs in thread) - SiS version with collect_nowait"""
     session = None
     retry_count = 0
@@ -474,7 +550,7 @@ def migrate_partition(tracking_table, source_database, source_schema, source_tab
                 copy_sql = f"""
                 COPY INTO @{stage}/{stage_path}/{partition_key_str}/
                 FROM (
-                    SELECT * FROM "{source_database}"."{source_schema}"."{source_table}"
+                    SELECT {parquet_compatible_columns} FROM "{source_database}"."{source_schema}"."{source_table}"
                     WHERE {where_clause}
                 )
                 FILE_FORMAT = (TYPE = PARQUET)
@@ -952,6 +1028,10 @@ with tab1:
             st.session_state.exchange_partitions_list = []
         if 'exchange_log_table_loaded' not in st.session_state:
             st.session_state.exchange_log_table_loaded = False
+        if 'exchange_parquet_columns' not in st.session_state:
+            st.session_state.exchange_parquet_columns = None
+        if 'exchange_parquet_transformations' not in st.session_state:
+            st.session_state.exchange_parquet_transformations = {}
         
         # Warehouse and Worker Configuration Section
         with st.expander("🏭 Warehouse & Worker Configuration", expanded=True):
@@ -1558,8 +1638,17 @@ with tab1:
                                 if not exchange_partition_columns:
                                     st.error("Please select a partition key column")
                                 else:
-                                    with st.spinner("Re-analyzing partitions..."):
+                                    with st.spinner("Re-analyzing partitions and refreshing Parquet schema..."):
                                         try:
+                                            # Get Parquet-compatible column transformations
+                                            parquet_columns, transformations = get_parquet_compatible_columns(
+                                                session, exchange_src_database, exchange_src_schema, exchange_src_table
+                                            )
+                                            
+                                            # Store in session state
+                                            st.session_state.exchange_parquet_columns = parquet_columns
+                                            st.session_state.exchange_parquet_transformations = transformations
+                                            
                                             # Drop existing log table
                                             fully_qualified_log_table = f'"{exchange_src_database}"."{exchange_src_schema}"."{log_table_name}"'
                                             session.sql(f"DROP TABLE IF EXISTS {fully_qualified_log_table}").collect()
@@ -1577,6 +1666,11 @@ with tab1:
                                                     exchange_src_schema, exchange_src_table, exchange_partition_columns
                                                 ):
                                                     st.success(f"✅ Partition re-analysis complete! Log table recreated: {log_table_name}")
+                                                    
+                                                    # Show transformation info
+                                                    if transformations:
+                                                        st.info(f"✓ Parquet compatibility: {sum(transformations.values())} column(s) will be transformed")
+                                                    
                                                     st.session_state.exchange_tracking_table_name = tracking_table
                                                     st.session_state.exchange_log_table_loaded = False
                                                     st.session_state.exchange_selected_partitions = []
@@ -1609,6 +1703,40 @@ with tab1:
                             # Initialize checkbox render version (used to force checkbox recreation)
                             if 'exchange_checkbox_version' not in st.session_state:
                                 st.session_state.exchange_checkbox_version = 0
+                            
+                            # Display Parquet transformation information if available
+                            if st.session_state.exchange_parquet_transformations:
+                                transformations = st.session_state.exchange_parquet_transformations
+                                total_transformed = sum(transformations.values())
+                                
+                                if total_transformed > 0:
+                                    st.divider()
+                                    st.subheader("📊 Parquet Export Configuration")
+                                    
+                                    with st.expander("ℹ️ Data Type Transformations (for Parquet compatibility)", expanded=False):
+                                        st.markdown("**The following column type transformations will be applied during export:**")
+                                        
+                                        transformation_details = []
+                                        if 'TIMESTAMP_TZ' in transformations:
+                                            transformation_details.append(f"• **TIMESTAMP_TZ** → TIMESTAMP_NTZ(6): {transformations['TIMESTAMP_TZ']} column(s)")
+                                        if 'TIMESTAMP_LTZ' in transformations:
+                                            transformation_details.append(f"• **TIMESTAMP_LTZ** → TIMESTAMP_NTZ(6): {transformations['TIMESTAMP_LTZ']} column(s)")
+                                        if 'TIMESTAMP_NTZ' in transformations:
+                                            transformation_details.append(f"• **TIMESTAMP_NTZ** → TIMESTAMP_NTZ(6): {transformations['TIMESTAMP_NTZ']} column(s)")
+                                        if 'TIME' in transformations:
+                                            transformation_details.append(f"• **TIME** → TIME(6): {transformations['TIME']} column(s)")
+                                        if 'VARIANT' in transformations:
+                                            transformation_details.append(f"• **VARIANT** → STRING: {transformations['VARIANT']} column(s)")
+                                        if 'GEOGRAPHY' in transformations:
+                                            transformation_details.append(f"• **GEOGRAPHY** → ST_ASTEXT(): {transformations['GEOGRAPHY']} column(s)")
+                                        if 'GEOMETRY' in transformations:
+                                            transformation_details.append(f"• **GEOMETRY** → ST_ASTEXT(): {transformations['GEOMETRY']} column(s)")
+                                        
+                                        for detail in transformation_details:
+                                            st.markdown(detail)
+                                        
+                                        st.caption(f"**Total columns transformed:** {total_transformed}")
+                                        st.caption("ℹ️ These transformations ensure compatibility with Parquet file format")
                             
                             # Wrap partition selection table in collapsible expander (collapsed by default)
                             with st.expander("🔍 Partition Selection Table", expanded=False):
@@ -1771,26 +1899,44 @@ with tab1:
                             if not exchange_partition_columns:
                                 st.error("Please select a partition key column")
                             else:
-                                with st.spinner("Analyzing partitions..."):
-                                    # Create tracking table
-                                    tracking_table = create_tracking_table(
-                                        session, exchange_src_database, exchange_src_schema, exchange_src_table,
-                                        exchange_partition_columns, column_types_dict
-                                    )
-                                    
-                                    if tracking_table:
-                                        # Populate tracking table
-                                        if populate_tracking_table(
-                                            session, tracking_table, exchange_src_database,
-                                            exchange_src_schema, exchange_src_table, exchange_partition_columns
-                                        ):
-                                            st.success(f"Partition analysis complete! Log table created: {log_table_name}")
-                                            st.session_state.exchange_tracking_table_name = tracking_table
-                                            st.rerun()
+                                with st.spinner("Analyzing partitions and preparing Parquet-compatible schema..."):
+                                    try:
+                                        # Get Parquet-compatible column transformations
+                                        parquet_columns, transformations = get_parquet_compatible_columns(
+                                            session, exchange_src_database, exchange_src_schema, exchange_src_table
+                                        )
+                                        
+                                        # Store in session state
+                                        st.session_state.exchange_parquet_columns = parquet_columns
+                                        st.session_state.exchange_parquet_transformations = transformations
+                                        
+                                        # Show transformation info
+                                        if transformations:
+                                            st.info(f"✓ Parquet compatibility: {sum(transformations.values())} column(s) will be transformed for export")
+                                        
+                                        # Create tracking table
+                                        tracking_table = create_tracking_table(
+                                            session, exchange_src_database, exchange_src_schema, exchange_src_table,
+                                            exchange_partition_columns, column_types_dict
+                                        )
+                                        
+                                        if tracking_table:
+                                            # Populate tracking table
+                                            if populate_tracking_table(
+                                                session, tracking_table, exchange_src_database,
+                                                exchange_src_schema, exchange_src_table, exchange_partition_columns
+                                            ):
+                                                st.success(f"Partition analysis complete! Log table created: {log_table_name}")
+                                                st.session_state.exchange_tracking_table_name = tracking_table
+                                                st.rerun()
+                                            else:
+                                                st.error("Failed to populate tracking table")
                                         else:
-                                            st.error("Failed to populate tracking table")
-                                    else:
-                                        st.error("Failed to create tracking table")
+                                            st.error("Failed to create tracking table")
+                                    
+                                    except Exception as e:
+                                        st.error(f"Failed to analyze table schema: {str(e)}")
+                                        st.stop()
             
             # Start/Stop Export Buttons
             col_btn1, col_btn2 = st.columns([1, 1])
@@ -1921,9 +2067,10 @@ with tab1:
                         print(f"[FirnExchange Export] Max workers: {exchange_max_workers}")
                         
                         # Start migration in background
-                        def run_migration(warehouse, max_workers_count, control_dict, export_overwrite=True, export_single=True, export_max_size=5368709120):
+                        def run_migration(warehouse, max_workers_count, control_dict, parquet_compatible_columns, export_overwrite=True, export_single=True, export_max_size=5368709120):
                             print(f"[FirnExchange Export] run_migration function started")
                             print(f"[FirnExchange Export] Warehouse: {warehouse}, Max workers: {max_workers_count}")
+                            print(f"[FirnExchange Export] Using Parquet-compatible column transformations")
                             try:
                                 print(f"[FirnExchange Export] Getting session from SiS context...")
                                 from snowflake.snowpark.context import get_active_session
@@ -1977,6 +2124,7 @@ with tab1:
                                                     exchange_stage,
                                                     exchange_stage_path,
                                                     warehouse,
+                                                    parquet_compatible_columns,
                                                     export_overwrite,
                                                     export_single,
                                                     export_max_size
@@ -2026,7 +2174,7 @@ with tab1:
                         exchange_control = get_exchange_control()
                         migration_thread = threading.Thread(
                             target=run_migration, 
-                            args=(exchange_warehouse, exchange_max_workers, exchange_control, export_overwrite, export_single_file, export_max_file_size)
+                            args=(exchange_warehouse, exchange_max_workers, exchange_control, st.session_state.exchange_parquet_columns, export_overwrite, export_single_file, export_max_file_size)
                         )
                         migration_thread.daemon = True
                         migration_thread.start()
