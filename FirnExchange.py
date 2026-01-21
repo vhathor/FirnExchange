@@ -603,7 +603,7 @@ def import_file_thread(file_path, target_database, target_schema, target_table, 
                 print(f"[Import Thread] Warning: Could not update log table to IN_PROGRESS: {str(e)}")
         
         # Build fully qualified table name
-        fully_qualified_table = f"{target_database}.{target_schema}.{target_table}"
+        fully_qualified_table = f'"{target_database}"."{target_schema}"."{target_table}"'
         
         # Build the COPY INTO command with load_mode and fixed parameters
         copy_command = f"""
@@ -1561,7 +1561,8 @@ with tab1:
                                     with st.spinner("Re-analyzing partitions..."):
                                         try:
                                             # Drop existing log table
-                                            session.sql(f"DROP TABLE IF EXISTS {log_table_name}").collect()
+                                            fully_qualified_log_table = f'"{exchange_src_database}"."{exchange_src_schema}"."{log_table_name}"'
+                                            session.sql(f"DROP TABLE IF EXISTS {fully_qualified_log_table}").collect()
                                             
                                             # Create tracking table
                                             tracking_table = create_tracking_table(
